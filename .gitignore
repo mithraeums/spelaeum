@@ -1,0 +1,18 @@
+# build
+spel
+build/
+*.o
+*.dSYM/
+
+# chains and weights are never in the repo
+*.mlf2
+*.opt
+*.blk
+*.dlt
+*.bin
+
+# macOS, editors
+*.DS_Store
+.idea/
+.vscode/
+*.swp
