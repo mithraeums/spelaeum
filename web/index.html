@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Spelaeum</title>
+<meta name="description" content="One open model, trained by many machines in rounds. Press start and this tab trains it.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<script>try{var t=localStorage.getItem('spel-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<style>
+[hidden]{display:none!important} body{margin:0} :root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+/* layout: a one-screen app like mithraeum.studio, panels on a sideways track. the yin to its yang:
+   where that site is ink ground with bone type, each panel here leads with an inverted slab. the
+   trainer lives in a bar under the track, so it keeps running whichever panel is showing */
+:root{
+  --ground:#0a0a09; --wall:#14130f; --seam:#2a2722; --dim:#8b8577; --text:#c8c2b2; --bright:#ece7da; --on-bright:#0a0a09;
+  --display:'EB Garamond',Georgia,'Times New Roman',serif; --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  --navh:54px; --barh:58px; color-scheme:dark;
+}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
+  --ground:#ece7da; --wall:#e2dccd; --seam:#c9c2b0; --dim:#6b6558; --text:#2a2722; --bright:#0a0a09; --on-bright:#ece7da; color-scheme:light } }
+:root[data-theme="light"]{
+  --ground:#ece7da; --wall:#e2dccd; --seam:#c9c2b0; --dim:#6b6558; --text:#2a2722; --bright:#0a0a09; --on-bright:#ece7da; color-scheme:light }
+*{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--ground);color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;overflow:hidden}
+.gut{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+a{color:inherit;text-underline-offset:3px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--bright);outline-offset:2px}
+nav{flex:none;height:var(--navh);display:flex;gap:4px 18px;align-items:center;border-bottom:1px solid var(--seam);font-size:12px;letter-spacing:.06em;overflow-x:auto;white-space:nowrap}
+nav .name{font-family:var(--display);font-size:22px;font-weight:600;color:var(--bright);letter-spacing:0;margin-right:auto;padding-right:14px}
+nav button{font:inherit;letter-spacing:inherit;background:none;border:0;border-bottom:2px solid transparent;color:var(--dim);padding:6px 0;cursor:pointer}
+nav button:hover{color:var(--bright)} nav button[aria-current="true"]{color:var(--bright);border-bottom-color:var(--bright)}
+/* theme: system, day or night, as on mithraeum.studio */
+nav .theme{flex:none;width:30px;height:30px;display:grid;place-items:center;padding:0;border:1px solid var(--seam);border-radius:50%;color:var(--dim)}
+nav .theme:hover{color:var(--bright);border-color:var(--bright)} nav .theme svg{width:15px;height:15px;display:block}
+.app{flex:1;min-height:0;overflow:hidden;position:relative}
+.track{display:flex;height:100%;transition:transform .46s cubic-bezier(.4,0,.2,1)}
+@media (prefers-reduced-motion: reduce){ .track{transition:none} }
+.panel{flex:0 0 100%;min-width:0;height:100%;overflow-y:auto}
+.in{max-width:980px;margin:0 auto;padding-block:28px 40px;display:flex;flex-direction:column;gap:22px}
+.label{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin:0}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(38px,7.2vw,64px);line-height:1.02;letter-spacing:-.01em;margin:0;text-wrap:balance}
+h1 em{font-style:italic;font-weight:500}
+h2{font-family:var(--display);font-weight:600;font-size:30px;line-height:1.1;color:var(--bright);margin:0;text-wrap:balance}
+p{margin:0;max-width:62ch}
+.note{font-size:12px;color:var(--dim)}
+.btn{font:500 13px var(--mono);letter-spacing:.04em;padding:10px 16px;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{opacity:.8}
+/* the inverted slab: the page's own negative */
+.slab{background:var(--bright);color:var(--on-bright);display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);min-height:300px}
+.slab .say{padding:30px 28px;display:flex;flex-direction:column;gap:18px;justify-content:center;min-width:0}
+.slab .say p{color:var(--on-bright);opacity:.82}
+.slab .btn.solid{background:var(--on-bright);color:var(--bright);border-color:var(--on-bright)}
+.slab .art{position:relative;min-height:220px;background:var(--ground);border:1px solid var(--bright);border-left:0}
+.slab canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.cta{display:flex;flex-wrap:wrap;gap:10px}
+.strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--seam)}
+.strip div{padding:12px 14px;border-right:1px solid var(--seam);min-width:0} .strip div:last-child{border-right:0}
+.strip b{display:block;font:600 21px var(--mono);color:var(--bright);font-variant-numeric:tabular-nums}
+.strip span{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+/* trainer panel */
+.console{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);border:1px solid var(--bright)}
+.console>div{padding:20px;min-width:0;display:flex;flex-direction:column;gap:14px}
+.console .feed{background:var(--wall);border-left:1px solid var(--seam);font-size:12.5px}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 16px;margin:0;font-variant-numeric:tabular-nums}
+.kv dt{color:var(--dim)} .kv dd{margin:0;color:var(--bright);overflow-wrap:anywhere}
+.meter{height:6px;background:var(--seam)} .meter i{display:block;height:100%;width:0;background:var(--bright)}
+.rounds{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;font-variant-numeric:tabular-nums}
+.rounds li{display:grid;grid-template-columns:70px minmax(0,1fr) auto;gap:10px;padding:5px 0;border-bottom:1px solid var(--seam)}
+.rounds li span:first-child{color:var(--dim)} .rounds li span:last-child{color:var(--bright)}
+/* chain */
+.shaft{display:flex;flex-direction:column;border-left:1px solid var(--bright);margin-left:6px}
+.blk{display:grid;grid-template-columns:56px 70px minmax(0,1fr) 70px;gap:12px;align-items:baseline;padding:10px 0 10px 20px;border-bottom:1px solid var(--seam);position:relative;font-variant-numeric:tabular-nums}
+.blk::before{content:"";position:absolute;left:-5px;top:16px;width:9px;height:9px;background:var(--ground);border:1px solid var(--bright)}
+.blk.trunk::before{background:var(--bright)}
+.blk .h{color:var(--bright);font-weight:600} .blk .k{color:var(--dim);font-size:12px} .blk .p{text-align:right;color:var(--bright)} .blk .m{min-width:0}
+.legend{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:12px;color:var(--dim)}
+.legend i{display:inline-block;width:9px;height:9px;border:1px solid var(--bright);margin-right:8px} .legend i.f{background:var(--bright)}
+.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));border-top:1px solid var(--seam)}
+.steps li{padding:14px 16px 14px 0;border-bottom:1px solid var(--seam);min-width:0}
+.steps b{display:block;font:italic 500 21px var(--display);color:var(--bright);margin-bottom:4px}
+.ways{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));border:1px solid var(--seam)}
+.ways section{padding:18px;border-right:1px solid var(--seam);display:flex;flex-direction:column;gap:10px;min-width:0} .ways section:last-child{border-right:0}
+.ways h3{font:600 15px var(--mono);color:var(--bright);margin:0}
+.tag{align-self:flex-start;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;border:1px solid var(--seam);color:var(--dim);padding:2px 7px}
+/* four ways to join: hairline grid that holds at any column count */
+.ways.four{grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--seam)}
+.ways.four section{background:var(--ground);border:0}
+@media (max-width:980px){ .ways.four{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width:680px){ .ways.four{grid-template-columns:minmax(0,1fr)} }
+/* the grades: a ladder, each rung ten times the last */
+.ladder td:first-child{font:italic 500 19px var(--display)} .ladder td.e{color:var(--dim)}
+.cols2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px 28px;align-items:start}
+.cols2>div{min-width:0;display:flex;flex-direction:column;gap:10px}
+@media (max-width:820px){ .cols2{grid-template-columns:minmax(0,1fr)} }
+.con-grade{padding-bottom:10px;min-width:0} .con-grade span{display:block;font-size:15px;color:var(--bright);overflow-wrap:anywhere}
+pre{margin:0;padding:11px 13px;background:var(--wall);overflow-x:auto;font:12.5px/1.6 var(--mono);color:var(--bright)}
+.tbl{overflow-x:auto} table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);font-weight:500;text-align:left;padding:8px 14px 8px 0;border-bottom:1px solid var(--bright)}
+td{padding:8px 14px 8px 0;border-bottom:1px solid var(--seam)} td.n,th.n{text-align:right;padding-right:0} td:first-child{color:var(--bright)}
+/* the trainer bar: always there */
+.bar{flex:none;min-height:var(--barh);border-top:1px solid var(--bright);background:var(--wall);display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding-block:9px;padding-bottom:calc(9px + env(safe-area-inset-bottom,0px));font-size:12.5px;font-variant-numeric:tabular-nums}
+.bar .dot{width:9px;height:9px;border:1px solid var(--bright);flex:none} .bar.on .dot{background:var(--bright);animation:pulse 1.4s steps(2) infinite}
+@keyframes pulse{50%{opacity:.25}} @media (prefers-reduced-motion: reduce){ .bar.on .dot{animation:none} }
+.bar .what{flex:1;min-width:0;color:var(--bright);overflow-wrap:anywhere}
+.bar .meter{flex:0 1 160px;min-width:60px}
+.bar .btn{padding:7px 14px;color:var(--bright)} .bar.on #go{background:var(--bright);color:var(--on-bright)}
+.arrows{position:absolute;right:max(16px,env(safe-area-inset-right,0px));bottom:12px;display:flex;gap:6px}
+.arrows button{font:500 13px var(--mono);width:34px;height:30px;background:var(--ground);border:1px solid var(--seam);color:var(--bright);cursor:pointer}
+.arrows button:disabled{opacity:.35;cursor:default}
+/* the console: the trainer full screen, for a device left on to train. it dims after a while
+   without a touch and drifts a few pixels a minute, so a screen left on does not burn in */
+.con{position:fixed;inset:0;z-index:50;background:var(--ground);display:flex;flex-direction:column}
+.con[hidden]{display:none}
+.con-top{flex:none;min-height:var(--navh);display:flex;align-items:center;flex-wrap:wrap;gap:6px 14px;border-bottom:1px solid var(--seam)}
+.con-top .name{font-family:var(--display);font-size:22px;font-weight:600;color:var(--bright)}
+.con-top .sp{flex:1} .con-top .btn{padding:7px 12px;color:var(--bright)}
+.con-foot .btn{padding:8px 16px;color:var(--bright)} .con.on #c-go{background:var(--bright);color:var(--on-bright)}
+.con-body{flex:1;min-height:0;width:100%;max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:16px;padding-block:20px;transition:opacity 1.2s,transform 1.2s}
+.con-foot{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;border-top:1px solid var(--seam);padding-block:12px;padding-bottom:calc(12px + env(safe-area-inset-bottom,0px));transition:opacity 1.2s}
+.con.rest .con-body{opacity:.4;transform:translate(var(--dx,0px),var(--dy,0px))} .con.rest .con-foot{opacity:.4}
+.con-head{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 28px}
+.con-head b{display:block;font:600 clamp(64px,14vw,132px)/.9 var(--display);color:var(--bright);font-variant-numeric:tabular-nums}
+.con-state{font-size:15px;color:var(--bright);padding-bottom:10px;min-width:0;overflow-wrap:anywhere}
+.con .meter{height:8px}
+.con-kv{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--seam);margin:0}
+.con-kv div{padding:10px 12px;border-right:1px solid var(--seam);min-width:0} .con-kv div:last-child{border-right:0}
+.con-kv dt{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.con-kv dd{margin:0;font:600 18px var(--mono);color:var(--bright);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.log{flex:1;min-height:140px;overflow-y:auto;background:var(--wall);border:1px solid var(--seam);padding:10px 12px;font-size:12.5px;line-height:1.55}
+.log div{overflow-wrap:anywhere} .log time{color:var(--dim);margin-right:10px} .log .k{color:var(--bright);display:inline-block;min-width:6ch}
+@media (max-width:680px){
+  .slab{grid-template-columns:minmax(0,1fr)} .slab .art{min-height:170px;border-left:1px solid var(--bright);border-top:0}
+  .strip{grid-template-columns:repeat(2,minmax(0,1fr))} .strip div:nth-child(2){border-right:0} .strip div:nth-child(-n+2){border-bottom:1px solid var(--seam)}
+  .console{grid-template-columns:minmax(0,1fr)} .console .feed{border-left:0;border-top:1px solid var(--seam)}
+  .blk{grid-template-columns:44px minmax(0,1fr) 58px} .blk .k{display:none}
+  .ways section{border-right:0;border-bottom:1px solid var(--seam)} .ways section:last-child{border-bottom:0}
+  nav .name{font-size:19px}
+  .con-kv{grid-template-columns:repeat(3,minmax(0,1fr))} .con-kv div:nth-child(3){border-right:0} .con-kv div:nth-child(-n+3){border-bottom:1px solid var(--seam)}
+  .con-foot .keys{display:none}
+}
+.kv input{font:inherit;color:var(--bright);background:var(--ground);border:1px solid var(--seam);padding:2px 6px;width:100%;max-width:16em}
+.row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;font-size:12.5px}
+.row label{display:flex;gap:6px;align-items:center;cursor:pointer}
+</style>
+</head>
+<body>
+
+<nav class="gut" aria-label="panels">
+  <span class="name">Spelaeum</span>
+  <button type="button" data-go="0">cave</button><button type="button" data-go="1">train</button><button type="button" data-go="2">chain</button>
+  <button type="button" data-go="3">how</button><button type="button" data-go="4">join</button><button type="button" data-go="5">credit</button><button type="button" data-go="6">open</button>
+  <a href="https://github.com/mithraeums/spelaeum">github</a>
+  <button type="button" class="theme" id="theme" aria-label="theme: system" title="theme: system"></button>
+</nav>
+
+<div class="app">
+<div class="track" id="track">
+
+<section class="panel" id="cave"><div class="in gut">
+  <div class="slab">
+    <div class="say">
+      <p class="label" style="color:inherit;opacity:.7">one open model, trained by many machines in rounds</p>
+      <h1>Trained by <em>whoever shows up.</em></h1>
+      <p>One open model. The data is fixed and public. The compute is everyone's spare hardware, from a gaming PC to the phone in a drawer. Work that makes the model better goes into the chain under your name and counts toward your grade. Grades are planned to earn perks on the hosted model.</p>
+      <div class="cta"><button class="btn solid" type="button" id="enter">Enter the cave</button><button class="btn" type="button" data-go="4">Other ways to join</button></div>
+    </div>
+    <div class="art"><canvas id="art" aria-label="contour lines descending to a low point, like a survey of a cave"></canvas></div>
+  </div>
+  <div class="strip" aria-label="chain status">
+    <div><b id="s-h">·</b><span>block height</span></div><div><b id="s-n">·</b><span>deltas this round</span></div>
+    <div><b id="s-p">·</b><span>perplexity now</span></div><div><b id="clock">·</b><span>until the seal</span></div>
+  </div>
+  <p class="note" id="s-note">reading the chain…</p>
+</div></section>
+
+<section class="panel" id="train"><div class="in gut">
+  <p class="label">train</p>
+  <h2>Press start once. It keeps going.</h2>
+  <p>The tab takes a job each round, trains, sends the result, waits for the seal and takes the next. Browse the other panels meanwhile: the bar at the bottom is the trainer.</p>
+  <div class="console">
+    <div>
+      <dl class="kv">
+        <dt>device</dt><dd id="dev">this browser</dd>
+        <dt>name</dt><dd><input id="name" maxlength="31" spellcheck="false" autocomplete="off" aria-label="the name your deltas carry"></dd>
+        <dt>key</dt><dd id="key">made on first start</dd>
+        <dt>dealt</dt><dd id="dealt">·</dd>
+        <dt>step</dt><dd id="step">·</dd>
+        <dt>loss</dt><dd id="loss">·</dd>
+        <dt>grade</dt><dd id="grade">none yet</dd>
+      </dl>
+      <div class="meter"><i class="fill"></i></div>
+      <div class="row"><label><input type="checkbox" id="gpu" checked> use the GPU when this browser has one</label></div>
+      <p class="note">Every job is the same 30 steps; one that misses the round is not taken, so a slow device may sit some out. Closing the tab stops it; what was already sent stays sent. The first start fetches the data and the model, about 480 MB, which this browser then keeps; a phone may not have the memory for it yet.</p>
+      <div class="row"><button class="btn" type="button" id="save-key">save your key</button><label class="btn" style="padding:10px 16px">use a key<input type="file" id="load-key" hidden></label></div>
+      <p class="note">Your key is your credit: a text file, the same as <code>~/.spel/key</code> for the spel CLI, so the work this tab does can follow you to a terminal.</p>
+      <div class="cta"><button class="btn" type="button" data-con>Open the console</button></div>
+    </div>
+    <div class="feed">
+      <dl class="kv"><dt>rounds trained</dt><dd id="nr">0</dd><dt>merged</dt><dd id="nm">0</dd></dl>
+      <ul class="rounds" id="rounds"></ul>
+    </div>
+  </div>
+</div></section>
+
+<section class="panel" id="chain"><div class="in gut">
+  <p class="label">the chain</p>
+  <h2>The chain is the model.</h2>
+  <p>Block 0 is a starting model. Every block after it is a change to the weights and the hash of the block before. Replay it from the bottom and you get the same model, bit for bit. The newest 64, as the coordinator has them:</p>
+  <div class="shaft" id="shaft"></div>
+  <div class="legend"><span><i class="f"></i>a block with a delta merged</span><span><i></i>a block where nothing passed</span></div>
+</div></section>
+
+<section class="panel" id="how"><div class="in gut">
+  <p class="label">how it works</p>
+  <h2>One round, five moves.</h2>
+  <ol class="steps">
+    <li><b>Deal</b>The last block's hash and your name pick your slice of the data. Nobody chooses their own.</li>
+    <li><b>Train</b>Your machine runs a training job on that slice. As many steps as it can manage.</li>
+    <li><b>Send</b>Your result goes in before the round closes. Nobody sees anyone else's until it does.</li>
+    <li><b>Check</b>All the results together pick the test text. Other trainers check yours on it, each check signed. It has to cut the loss.</li>
+    <li><b>Merge</b>Every result that passes is merged into the block, and the block records who trained it.</li>
+  </ol>
+  <p class="note">The coordinator keeps the clock and spot-checks the checkers: a key that signs a wrong loss stops checking. Anyone can replay the whole chain and re-run every block's loss, so nobody can fake a block.</p>
+</div></section>
+
+<section class="panel" id="join"><div class="in gut">
+  <p class="label">ways to join</p>
+  <h2>Anything with a processor.</h2>
+  <div class="ways four">
+    <section><h3>This tab</h3><span class="tag">works today</span><p>Press start. The same C as the CLI, compiled to WebAssembly, every check done in it the way a terminal does it.</p></section>
+    <section><h3>The spel CLI</h3><span class="tag">works today</span><p>One binary, C, no Python. For machines that stay on.</p><pre>spel train cave --name ana \
+  --url https://spelaeum.mithraeum.studio --loop</pre></section>
+    <section><h3>A farm</h3><span class="tag">works today</span><p>One machine runs a relay, and every phone and desktop on the farm trains through it. The coordinator sees one client.</p><pre>spel relay farm \
+  --url https://spelaeum.mithraeum.studio --bind 0.0.0.0</pre></section>
+    <section><h3>A GPU</h3><span class="tag">works today</span><p>WebGPU in this tab where the browser has it (Chrome and Edge), OpenCL in the CLI with <code>make GPU=1</code>. Where most of the power is.</p></section>
+  </div>
+  <p class="note">Waiting trainers check each other's work, about a hundredth of a job each, so the coordinator stays a small machine. The data, the model and the blocks download from the mirror on <a href="https://huggingface.co/datasets/mithraeum/spelaeum">Hugging Face</a>.</p>
+</div></section>
+
+<section class="panel" id="credit"><div class="in gut">
+  <p class="label">credit</p>
+  <h2>Credit, counted in work.</h2>
+  <p>Every job that passes its check counts as the computing it took, and the blocks record whose it was, so anyone can add it up with <code>spel credit</code>.</p>
+  <p>The reward: grades are planned to earn perks on the hosted model when it opens, kept to the account that earned them.</p>
+  <div class="cols2">
+    <div>
+      <p class="label">the grades</p>
+      <div class="tbl"><table class="ladder">
+        <thead><tr><th>grade</th><th class="n">operations</th><th class="n">a phone, in a tab</th><th class="n">one RTX 3060</th></tr></thead>
+        <tbody>
+          <tr><td>Corax</td><td class="n">10¹⁵</td><td class="n">a week</td><td class="n">2 min</td></tr>
+          <tr><td>Nymphus</td><td class="n">10¹⁶</td><td class="n">2 months</td><td class="n">17 min</td></tr>
+          <tr><td>Miles</td><td class="n">10¹⁷</td><td class="n">a year and a half</td><td class="n">3 hours</td></tr>
+          <tr><td>Leo</td><td class="n">10¹⁸</td><td class="n e">·</td><td class="n">a day</td></tr>
+          <tr><td>Perses</td><td class="n">10¹⁹</td><td class="n e">·</td><td class="n">12 days</td></tr>
+          <tr><td>Heliodromus</td><td class="n">10²⁰</td><td class="n e">·</td><td class="n">4 months</td></tr>
+          <tr><td>Pater</td><td class="n">10²¹</td><td class="n e">·</td><td class="n">3 years</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note">The seven grades of the Mithraic mysteries, each ten times the last. Times are rough, running nonstop. Grades measure computing, not model size: Pater is about a ten-thousandth of the computing in one frontier-scale training run, around 10²⁵ operations by public estimates.</p>
+    </div>
+    <div>
+      <p class="label">the board</p>
+      <div class="tbl"><table>
+        <thead><tr><th>trainer</th><th class="n">passed</th><th class="n">merged</th><th class="n">refused</th></tr></thead>
+        <tbody id="board"></tbody>
+      </table></div>
+      <p class="note">The last 64 blocks, read from their heads. <code>spel credit</code> on any copy of the chain adds up all of it, and your grade above comes from this tab's own copy.</p>
+    </div>
+  </div>
+  <p class="note">Spelaeum is part of Mithraeum · GPL-3.0 · <a href="https://github.com/mithraeums/hako">hako engine</a></p>
+</div></section>
+
+<section class="panel" id="open"><div class="in gut">
+  <p class="label">open</p>
+  <h2>Nothing here needs us.</h2>
+  <p>The code, the method, the chain and the weights are all GPL-3.0. The chain is the full record of how the model was made, so anyone can rebuild it, run it, host it, or start a chain of their own the same way.</p>
+  <div class="ways">
+    <section><h3>Run it</h3><span class="tag">free</span><p>Every weight is in the chain. Replay it and run the model on your own machine.</p></section>
+    <section><h3>Host it, fork it</h3><span class="tag">free</span><p>The chain is plain files: mirror it on any static host, serve the model, fork the chain, train your own with spel. The GPL asks one thing: what you change stays open too.</p></section>
+    <section><h3>Or use ours</h3><span class="tag">later</span><p>Once the model is too big for one machine, we host it so you don't have to. Paid use covers the cloud bill and a salary for the person running it. Small models stay free. We don't take your data to pay for it.</p></section>
+  </div>
+</div></section>
+
+</div>
+<div class="arrows"><button type="button" id="prev" aria-label="previous panel">←</button><button type="button" id="next" aria-label="next panel">→</button></div>
+</div>
+
+<div class="bar gut" id="bar">
+  <span class="dot"></span>
+  <span class="what" id="what">ready to train</span>
+  <div class="meter"><i class="fill"></i></div>
+  <button class="btn" type="button" id="open-con" data-con>Console</button>
+  <button class="btn" type="button" id="go">Start training</button>
+</div>
+
+<div class="con" id="con" hidden role="dialog" aria-modal="true" aria-label="training console">
+  <div class="con-top gut"><span class="name">Spelaeum</span><span class="label">training console</span><span class="sp"></span>
+    <button class="btn" type="button" id="con-fs">full screen</button><button class="btn" type="button" id="con-x">close</button></div>
+  <div class="con-body gut">
+    <div class="con-head"><div><p class="label">block</p><b id="c-blk">7</b></div><div class="con-state" id="c-state">ready to train</div>
+      <div class="con-grade"><p class="label">grade</p><span id="c-grade">none yet</span></div></div>
+    <div class="meter"><i class="fill"></i></div>
+    <dl class="con-kv">
+      <div><dt>step</dt><dd id="c-step">0 / 100</dd></div><div><dt>loss</dt><dd id="c-loss">5.4120</dd></div>
+      <div><dt>rounds</dt><dd id="c-nr">0</dd></div><div><dt>merged</dt><dd id="c-nm">0</dd></div>
+      <div><dt>training for</dt><dd id="c-up">0:00:00</dd></div><div><dt>seal in</dt><dd id="c-seal">07:42</dd></div>
+    </dl>
+    <div class="log" id="log"></div>
+  </div>
+  <div class="con-foot gut">
+    <button class="btn" type="button" id="c-go">Start training</button>
+    <span class="note" id="c-wake"></span><span class="sp" style="flex:1"></span>
+    <span class="note keys">space start or stop · f full screen · esc close</span>
+  </div>
+</div>
+
+<script>
+// panels
+var names=['cave','train','chain','how','join','credit','open'],cur=0,track=document.getElementById('track');
+function go(i){
+  cur=Math.max(0,Math.min(names.length-1,i));track.style.transform='translateX(-'+(cur*100)+'%)';
+  document.querySelectorAll('nav [data-go]').forEach(function(b){b.setAttribute('aria-current',String(+b.dataset.go===cur))});
+  document.getElementById('prev').disabled=cur===0;document.getElementById('next').disabled=cur===names.length-1;
+  try{history.replaceState(null,'','#'+names[cur])}catch(e){}
+}
+document.querySelectorAll('[data-go]').forEach(function(b){b.addEventListener('click',function(){go(+b.dataset.go)})});
+document.getElementById('prev').addEventListener('click',function(){go(cur-1)});
+document.getElementById('next').addEventListener('click',function(){go(cur+1)});
+document.addEventListener('keydown',function(e){
+  var con=document.getElementById('con');
+  if(!con.hidden){
+    if(e.key==='Escape'&&!document.fullscreenElement)closeCon();
+    else if(e.key===' '&&!(e.target&&e.target.tagName==='BUTTON')){e.preventDefault();toggle()}
+    else if(e.key==='f'||e.key==='F')fullScreen();
+    return;
+  }
+  if(e.key==='ArrowRight')go(cur+1);if(e.key==='ArrowLeft')go(cur-1)});
+var x0=null;track.addEventListener('touchstart',function(e){x0=e.touches[0].clientX},{passive:true});
+track.addEventListener('touchend',function(e){if(x0===null)return;var d=e.changedTouches[0].clientX-x0;x0=null;if(Math.abs(d)>70)go(cur+(d<0?1:-1))},{passive:true});
+function fromHash(){var i=names.indexOf(location.hash.slice(1));go(i<0?0:i)} window.addEventListener('hashchange',fromHash);fromHash();
+
+// the live page: the chain as the coordinator has it (/tip and /status.json, every 20 s), and the
+// trainer in a worker (worker.js), its events drawn here and written to the console's log
+function $(id){return document.getElementById(id)}
+var bar=$('bar'),btn=$('go'),what=$('what'),timer=null,worker=null,step=0,steps=30,loss=null,blk=null,nr=0,nm=0,rows=[],upMs=0,upFrom=0,ops=0,tipT=null,skew=0,dealt='·',last={passed:0,merged:0,refused:0},SEED=null;
+// the grades, as spel credit has them: Corax at 10^15 operations, each ten times the last
+var GR=['Corax','Nymphus','Miles','Leo','Perses','Heliodromus','Pater'];
+function sup(n){return '10'+String(n).replace(/\d/g,function(d){return '⁰¹²³⁴⁵⁶⁷⁸⁹'[d]})}
+function gradeText(o){var g=0,b=1e15;while(g<7&&o>=b){g++;b*=10}
+  return (g?GR[g-1]:'none yet')+(g<7?' · '+GR[g]+' at '+sup(Math.round(Math.log10(b)))+', '+(100*o/b).toFixed(1)+'%':' · the last')}
+function ppl(l){return l>0&&isFinite(l)?Math.exp(l).toFixed(2):'·'}
+function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+function hexOf(b){return Array.from(b,function(x){return x.toString(16).padStart(2,'0')}).join('')}
+// the key: a 32-byte seed kept in this browser, the same text as spel's ~/.spel/key
+function seed(){if(SEED)return SEED;var s=store('spel-seed');if(!/^[0-9a-f]{64}$/.test(s||'')){s=hexOf(crypto.getRandomValues(new Uint8Array(32)));store('spel-seed',s)}return SEED=s}
+var NAME=/^[A-Za-z0-9._-]{1,31}$/;
+(function(){var n=store('spel-name');if(!NAME.test(n||'')){n='tab-'+hexOf(crypto.getRandomValues(new Uint8Array(3)));store('spel-name',n)}$('name').value=n})();
+$('name').addEventListener('change',function(){var n=$('name').value.trim();if(NAME.test(n))store('spel-name',n);else $('name').value=store('spel-name')||''});
+function draw(){
+  $('step').textContent=blk===null?'·':step+' / '+steps;$('loss').textContent=loss===null?'·':loss.toFixed(4);
+  var pct=steps?Math.min(100,100*step/steps):0;document.querySelectorAll('.fill').forEach(function(f){f.style.width=pct+'%'});
+  $('nr').textContent=nr;$('nm').textContent=nm;$('dealt').textContent=dealt;
+  $('c-blk').textContent=blk===null?'·':blk;$('c-state').textContent=what.textContent;
+  $('c-step').textContent=$('step').textContent;$('c-loss').textContent=$('loss').textContent;$('c-nr').textContent=nr;$('c-nm').textContent=nm;
+  $('grade').textContent=$('c-grade').textContent=gradeText(ops);
+  var ul=$('rounds');ul.textContent='';
+  rows.slice(-6).reverse().forEach(function(r){var li=document.createElement('li');r.forEach(function(t){var x=document.createElement('span');x.textContent=t;li.appendChild(x)});ul.appendChild(li)});
+}
+function say(t){what.textContent=t;draw()}
+
+// the chain
+function refresh(){
+  fetch('tip',{cache:'no-store'}).then(function(r){return r.ok?r.text():Promise.reject()}).then(function(t){
+    var o={};t.split('\n').forEach(function(l){var p=l.split(' ');if(p[0])o[p[0]]=p[1]});
+    tipT={height:+o.height,seal:+o.seal,now:+o.now,phase:o.phase||''};skew=tipT.now-Date.now()/1000;
+  }).catch(function(){tipT=null});
+  fetch('status.json',{cache:'no-store'}).then(function(r){return r.ok?r.json():Promise.reject()}).then(chain)
+    .catch(function(){$('s-note').textContent='the coordinator is not answering; trying again in 20 s'});
+}
+function chain(st){
+  var top=st.blocks&&st.blocks[0];
+  $('s-h').textContent=st.height;$('s-n').textContent=st.pending;$('s-p').textContent=top?ppl(top.loss):'·';
+  $('s-note').textContent='Live: block '+st.height+(top?', perplexity '+ppl(top.loss)+' on the round\'s test text':', the starting model')+
+    '. The next block must cut the loss by '+(+st.next.difficulty).toPrecision(3)+' nats per token.';
+  var sh=$('shaft');sh.textContent='';
+  (st.blocks||[]).concat([{height:0,genesis:true}]).forEach(function(b){
+    var d=document.createElement('div'),merged=0,all=b.trainers?b.trainers.length:0;
+    (b.trainers||[]).forEach(function(x){if(x.state==='merged')merged++});
+    d.className='blk'+(merged?' trunk':'');
+    [['h','#'+b.height],['k',b.genesis?'genesis':b.kind],['m',b.genesis?'the starting model':all?merged+' of '+all+' merged':'no deltas'],['p',b.genesis?'·':ppl(b.loss)]]
+      .forEach(function(c){var x=document.createElement('span');x.className=c[0];x.textContent=c[1];d.appendChild(x)});
+    sh.appendChild(d)});
+  var by={},order=[];
+  (st.blocks||[]).forEach(function(b){(b.trainers||[]).forEach(function(x){var e=by[x.key];if(!e){e=by[x.key]={name:x.name,p:0,m:0,r:0};order.push(x.key)}
+    if(x.state==='refused')e.r++;else{e.p++;if(x.state==='merged')e.m++}})});
+  order.sort(function(a,b){return by[b].p-by[a].p||by[b].m-by[a].m});
+  var tb=$('board');tb.textContent='';
+  order.slice(0,20).forEach(function(k){var e=by[k],tr=document.createElement('tr');
+    [e.name||k.slice(0,8),e.p,e.m,e.r].forEach(function(v,i){var td=document.createElement('td');td.textContent=v;if(i)td.className='n';tr.appendChild(td)});tb.appendChild(tr)});
+  if(!order.length){var tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=4;td.textContent='nobody yet: press start and be the first';tr.appendChild(td);tb.appendChild(tr)}
+}
+refresh();setInterval(refresh,20000);
+
+// the trainer, in a worker: terminating it is the stop (a job on the CPU is one long call)
+function settle(d){   /* the round before this one: what its block made of this key's delta */
+  var r=rows.length>1?rows[rows.length-2]:null;
+  if(r&&r[1].indexOf('sent')===0){
+    if(d.merged>last.merged){r[1]='merged into the block';r[2]='✓'}
+    else if(d.passed>last.passed){r[1]='passed, the merge went without it';r[2]='·'}
+    else if(d.refused>last.refused){r[1]='did not cut the loss enough';r[2]='–'}}
+  last={passed:d.passed||0,merged:d.merged||0,refused:d.refused||0};
+}
+function onEvent(ev,d){
+  if(ev==='device'){var g=d&&typeof d==='object'?d.name:d;$('dev').textContent=g?'this browser, on its GPU ('+g+')':'this browser, on its CPU'}
+  else if(ev==='key'){$('key').textContent=d.slice(0,16)+'…';$('key').title=d}
+  else if(ev==='fetch'){log('fetch',d.name+(d.from==='cache'?' from this browser':' from the '+d.from));if(d.from!=='cache'&&!/\.blk$/.test(d.name))say('fetching '+d.name+', once')}
+  else if(ev==='job'){blk=d.height+1;step=0;loss=null;log('job','block '+blk);say('block '+blk+' · training')}
+  else if(ev==='stderr'){String(d).split('\n').forEach(function(l){var m;
+    if((m=/^train: height (\d+), shard (\d+) of (\d+), (\d+) steps/.exec(l))){dealt='shard '+m[2]+' of '+m[3];steps=+m[4];log('dealt',dealt+', '+steps+' steps')}
+    else if((m=/^\s+step (\d+)\/(\d+)\s+loss ([\d.]+)/.exec(l))){step=+m[1];steps=+m[2];loss=+m[3];
+      say('block '+blk+' · training, step '+step+' of '+steps+' · loss '+loss.toFixed(4));
+      if(step===steps||step%10===0)log('train','step '+step+' of '+steps+' · loss '+loss.toFixed(4))}})}
+  else if(ev==='sent'){nr++;rows.push(['block '+(d.height+1),'sent, waiting for the seal','·']);log('sent','delta '+d.hex.slice(0,12)+'… · the coordinator took it');say('block '+(d.height+1)+' · sent, waiting for the round to close')}
+  else if(ev==='refused'){rows.push(['block '+(d.height+1),'not taken: '+d.said,'–']);log('refused',d.said);say('block '+(d.height+1)+' · not taken: '+d.said)}
+  else if(ev==='checked'){log('checked','a delta of this round, its loss signed with your key and taken')}
+  else if(ev==='credit'){settle(d);ops=d.ops||0;nm=d.merged||0}
+  else if(ev==='error'){log('error',d);say('trying again in 30 s: '+d)}
+  draw();
+}
+function toggle(){
+  if(timer){worker.terminate();worker=null;timer=null;bar.classList.remove('on');con.classList.remove('on');btn.textContent=$('c-go').textContent='Start training';
+    upMs+=Date.now()-upFrom;log('stop',nr+' rounds sent, '+nm+' merged · what was sent stays sent');say('stopped · '+nr+' rounds sent, '+nm+' merged');letSleep();return}
+  if(!window.Worker||!window.WebAssembly){say('this browser cannot train here: it lacks WebAssembly or workers');return}
+  var n=$('name').value.trim();if(!NAME.test(n)){say('a name is 1 to 31 of a-z A-Z 0-9 . _ -');return}
+  worker=new Worker('worker.js',{type:'module'});
+  worker.onmessage=function(e){onEvent(e.data.event,e.data.data)};
+  worker.onerror=function(e){log('error',e.message||'the trainer stopped')};
+  worker.postMessage({go:{url:location.origin,name:n,seed:seed(),gpu:$('gpu').checked}});
+  timer=1;bar.classList.add('on');con.classList.add('on');btn.textContent=$('c-go').textContent='Stop';upFrom=Date.now();
+  log('start',n);say('starting');if(!$('con').hidden)keepAwake();
+}
+$('save-key').addEventListener('click',function(){var a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['spelaeum key\n'+seed()+'\n'],{type:'text/plain'}));
+  a.download='spelaeum.key';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(a.href)},2000)});
+$('load-key').addEventListener('change',function(){var f=this.files[0];if(!f)return;f.text().then(function(t){var m=/^spelaeum key\n([0-9a-f]{64})\s*$/.exec(t);
+  if(!m){log('key','that is not a spelaeum key file');return}
+  SEED=m[1];store('spel-seed',SEED);last={passed:0,merged:0,refused:0};log('key','this tab trains as the key in '+f.name);$('key').textContent='from '+f.name;if(timer){toggle();toggle()}})});
+function clock(ms){var s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor(s/60)%60;s%=60;return h+':'+(m<10?'0':'')+m+':'+(s<10?'0':'')+s}
+function stamp(){var d=new Date();return [d.getHours(),d.getMinutes(),d.getSeconds()].map(function(n){return (n<10?'0':'')+n}).join(':')}
+function log(k,text){
+  var el=$('log'),row=document.createElement('div'),t=document.createElement('time'),b=document.createElement('span');
+  t.textContent=stamp();b.className='k';b.textContent=k;row.appendChild(t);row.appendChild(b);row.appendChild(document.createTextNode(' '+text));
+  var stick=el.scrollTop+el.clientHeight>=el.scrollHeight-8;el.appendChild(row);
+  while(el.childNodes.length>400)el.removeChild(el.firstChild);if(stick)el.scrollTop=el.scrollHeight;
+}
+// the console: open, full screen, the screen kept on while it is open and training, dim and drift when left alone
+var con=$('con'),wake=null,restT=null;
+function openCon(){con.hidden=false;keepAwake();poke();$('log').scrollTop=$('log').scrollHeight;$('con-x').focus()}
+function closeCon(){if(document.fullscreenElement)document.exitFullscreen().catch(function(){});con.hidden=true;letSleep();$('open-con').focus()}
+function keepAwake(){
+  if(!timer||wake||!('wakeLock' in navigator)){wakeNote();return}
+  navigator.wakeLock.request('screen').then(function(l){wake=l;l.addEventListener('release',function(){wake=null;wakeNote()});wakeNote()}).catch(function(){wakeNote()});
+}
+function letSleep(){if(wake){wake.release().catch(function(){});wake=null}wakeNote()}
+function wakeNote(){$('c-wake').textContent=!('wakeLock' in navigator)?'this browser may let the screen sleep: plug in and turn off auto-lock'
+  :wake?'the screen stays on while the console is open':timer?'the screen may sleep here: plug in and turn off auto-lock':'start training and the screen stays on while this is open'}
+function fullScreen(){if(document.fullscreenElement)document.exitFullscreen().catch(function(){});else if(con.requestFullscreen)con.requestFullscreen().catch(function(){})}
+function poke(){con.classList.remove('rest');clearTimeout(restT);restT=setTimeout(function(){con.classList.add('rest')},30000)}
+['pointermove','pointerdown','keydown'].forEach(function(ev){con.addEventListener(ev,poke)});
+setInterval(function(){if(con.classList.contains('rest')){con.style.setProperty('--dx',(Math.random()*16-8|0)+'px');con.style.setProperty('--dy',(Math.random()*12-6|0)+'px')}},60000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&!con.hidden)keepAwake()});
+document.addEventListener('fullscreenchange',function(){$('con-fs').textContent=document.fullscreenElement?'leave full screen':'full screen'});
+if(!document.fullscreenEnabled)$('con-fs').hidden=true;   /* an iPhone: the console already fills the screen */
+document.querySelectorAll('[data-con]').forEach(function(b){b.addEventListener('click',openCon)});
+$('con-x').addEventListener('click',closeCon);$('con-fs').addEventListener('click',fullScreen);$('c-go').addEventListener('click',toggle);
+log('ready','press start: this tab takes a job each round, trains it and sends it');wakeNote();
+btn.addEventListener('click',toggle);
+$('enter').addEventListener('click',function(){go(1);if(!timer)toggle()});
+draw();
+setInterval(function(){
+  var c='·';
+  if(tipT&&tipT.seal){var left=Math.max(0,Math.round(tipT.seal-(Date.now()/1000+skew))),m=Math.floor(left/60),x=left%60;c=tipT.phase==='checking'?'checking':(m<10?'0':'')+m+':'+(x<10?'0':'')+x}
+  $('clock').textContent=$('c-seal').textContent=c;$('c-up').textContent=clock(upMs+(timer?Date.now()-upFrom:0))},1000);
+// theme: system, day or night, remembered in this browser (applied in the head, before the first paint)
+(function(){
+  var b=$('theme'),root=document.documentElement,ORDER=['system','light','dark'],NAME={system:'system',light:'day',dark:'night'};
+  var ICON={system:'<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg>',
+    light:'<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6 13 13M3 13l1.4-1.4M11.6 4.4 13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+    dark:'<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>'};
+  function stored(){try{var t=localStorage.getItem('spel-theme');return t==='light'||t==='dark'?t:'system'}catch(e){return 'system'}}
+  function apply(t){if(t==='system')root.removeAttribute('data-theme');else root.setAttribute('data-theme',t);b.innerHTML=ICON[t];b.setAttribute('aria-label','theme: '+NAME[t]+', press to change');b.title='theme: '+NAME[t]}
+  var cur=stored();apply(cur);
+  b.addEventListener('click',function(){cur=ORDER[(ORDER.indexOf(cur)+1)%ORDER.length];try{if(cur==='system')localStorage.removeItem('spel-theme');else localStorage.setItem('spel-theme',cur)}catch(e){}apply(cur)});
+})();
+
+// the artwork: a cave survey that is also a loss landscape. closed contours sinking to one low point
+(function(){
+  var c=$('art'),g=c.getContext('2d');
+  function paint(){
+    var r=c.getBoundingClientRect(),d=Math.min(window.devicePixelRatio||1,2),w=r.width,h=r.height;
+    if(!w||!h)return;c.width=w*d;c.height=h*d;g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);
+    var ink=getComputedStyle(document.documentElement).getPropertyValue('--bright').trim()||'#ece7da';
+    var cx=w*.56,cy=h*.6,R=Math.max(w,h)*.95,rings=17;
+    for(var i=0;i<rings;i++){
+      var t=i/(rings-1),rad=R*Math.pow(1-t,1.55)+3;
+      g.beginPath();
+      for(var a=0;a<=360;a+=3){var th=a*Math.PI/180;
+        var wob=1+.16*(1-t)*Math.sin(3*th+i*.7)+.09*(1-t)*Math.sin(7*th-i*1.3)+.05*Math.sin(11*th+i);
+        var x=cx+Math.cos(th)*rad*wob*1.12,y=cy+Math.sin(th)*rad*wob*.78;
+        if(a)g.lineTo(x,y);else g.moveTo(x,y)}
+      g.closePath();g.strokeStyle=ink;g.globalAlpha=.22+.6*t;g.lineWidth=i%4===0?1.3:.7;g.stroke();
+    }
+    g.globalAlpha=1;g.fillStyle=ink;g.fillRect(cx-3,cy-3,6,6);
+  }
+  paint();window.addEventListener('resize',paint);
+  try{matchMedia('(prefers-color-scheme: dark)').addEventListener('change',paint)}catch(e){}
+  try{new MutationObserver(paint).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']})}catch(e){}
+})();
+</script>
+</body>
+</html>

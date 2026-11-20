@@ -1,0 +1,20 @@
+# spelaeum.mithraeum.studio: TLS here, the coordinator on loopback, the page as static files.
+# Imported by the box's Caddyfile (import /etc/caddy/sites/*.caddy). No `log` directive, so
+# Caddy keeps no access log: no IPs at rest.
+spelaeum.mithraeum.studio {
+	header -Server
+	@page path / /index.html /worker.js /trainer.js /wasi.js /gpu.js /spel.wasm /icon.svg
+	handle @page {
+		root * /var/www/spelaeum
+		header Cache-Control "no-cache"
+		file_server
+	}
+	handle {
+		request_body {
+			max_size 256MB
+		}
+		reverse_proxy 127.0.0.1:7717 {
+			flush_interval -1
+		}
+	}
+}

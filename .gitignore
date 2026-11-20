@@ -1,6 +1,7 @@
 # build
 spel
 build/
+web/spel.wasm
 *.o
 *.dSYM/
 
@@ -16,3 +17,6 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# working notes and diagrams, not published yet
+docs/

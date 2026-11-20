@@ -1,0 +1,48 @@
+# the spelaeum coordinator: hands out the chain, takes deltas, seals on the clock.
+# Loopback only; Caddy does TLS (spelaeum.caddy). The chain is /var/lib/spelaeum/cave,
+# its big files on the Hugging Face mirror, which after.sh fills once each block is sealed.
+[Unit]
+Description=spelaeum coordinator: one open model, trained by many machines in rounds
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=spelaeum
+Group=spelaeum
+Environment=HF_HOME=/var/lib/spelaeum/hf
+Environment=SPEL_MIRROR_REPO=mithraeum/spelaeum
+# a round can take 512 deltas of 59 MB: past this much free disk (MB) it refuses the rest, so the relay never runs short
+Environment=SPEL_KEEP_FREE=2048
+ExecStart=/usr/local/bin/spel serve /var/lib/spelaeum/cave --port 7717 --bind 127.0.0.1 --round 900 \
+	--checks 2 --spot 8 --check-window 120 \
+	--files https://huggingface.co/datasets/mithraeum/spelaeum/resolve/main \
+	--after /usr/local/lib/spelaeum/after.sh --threads 2 --nice 5
+StateDirectory=spelaeum
+StateDirectoryMode=0750
+UMask=0027
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=4096
+# nothing it does needs more than its own state directory and the network
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
