@@ -38,9 +38,11 @@ $(B)/test_net: tests/test_net.c $(SRC) $(HDR) | $(B)
 	$(CC) -O1 -g $(FLAGS) $(SAN) $(ARCH) -o $@ tests/test_net.c $(SRC) -lm -lpthread
 
 # built as files, run every time; then our own sources with warnings as errors
-test: $(B)/test_keys $(B)/test_chain $(B)/test_net werror-check
+test: $(B)/test_keys $(B)/test_chain $(B)/test_net spel werror-check
 	@[ -n "$(SAN)" ] || echo "test: this compiler has no ASan/UBSan, running the tests without them"
 	@$(B)/test_keys && $(B)/test_chain && $(B)/test_net
+	@[ -x $(HAKO)/hakm-train ] || $(MAKE) -C $(HAKO) hakm-train
+	@HAKO=$(HAKO) sh tests/test_after.sh
 
 werror-check:
 	@for f in src/*.c cli/*.c tests/*.c web/*.c; do $(CC) -O2 $(FLAGS) -Werror -c $$f -o /dev/null || exit 1; done; \

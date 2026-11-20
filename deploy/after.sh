@@ -7,20 +7,35 @@
 set -eu
 dir=$1 height=$2
 repo=${SPEL_MIRROR_REPO:-mithraeum/spelaeum}
-out=/var/lib/spelaeum/mirror
-hf=/var/lib/spelaeum/venv/bin/hf
-list=$(mktemp)
-trap 'rm -f "$list"' EXIT
-/usr/local/bin/spel mirror "$dir" "$out" --every 8 > "$list"
+out=${SPEL_MIRROR_OUT:-/var/lib/spelaeum/mirror}   # these three are only moved by tests/test_after.sh
+hf=${SPEL_HF:-/var/lib/spelaeum/venv/bin/hf}
+spel=${SPEL_BIN:-/usr/local/bin/spel}
+list=$(mktemp) sent=$(mktemp)
+trap 'rm -f "$list" "$sent"' EXIT
+# spel mirror takes whatever is in $out as mirrored already, so a path that did not get up
+# must not stay there: on a failed upload every path of this run not sent yet is taken
+# back, the mirror's height is left where it was, and the next block's run sends them again
+up() {
+	if "$hf" upload "$repo" "$out/$1" "$1" --repo-type dataset --commit-message "$2" --format quiet </dev/null >/dev/null; then
+		echo "$1" >> "$sent"
+		return 0
+	fi
+	while read -r p; do
+		if [ -n "$p" ] && ! grep -qxF "$p" "$sent"; then rm -f "$out/$p"; fi
+	done < "$list"
+	echo "after: $1 did not reach $repo; the next block's run sends it again" >&2
+	exit 1
+}
+"$spel" mirror "$dir" "$out" --every 8 > "$list"
 while read -r path; do
 	[ -n "$path" ] || continue
 	case "$path" in tip|tip.mlf2) continue ;; esac   # the snapshot goes last, model before the tip that names it
-	"$hf" upload "$repo" "$out/$path" "$path" --repo-type dataset --commit-message "block $height: $path" --format quiet >/dev/null
+	up "$path" "block $height: $path"
 	case "$path" in blocks/*) : > "$out/$path" ;; esac
 done < "$list"
 if grep -qx tip "$list"; then
-	"$hf" upload "$repo" "$out/tip.mlf2" tip.mlf2 --repo-type dataset --commit-message "block $height: snapshot" --format quiet >/dev/null
-	"$hf" upload "$repo" "$out/tip" tip --repo-type dataset --commit-message "block $height: snapshot tip" --format quiet >/dev/null
+	up tip.mlf2 "block $height: snapshot"
+	up tip "block $height: snapshot tip"
 fi
 echo "$height" > "$dir/mirrored.part" && mv "$dir/mirrored.part" "$dir/mirrored"
-/usr/local/bin/spel prune "$dir" --keep 64 >/dev/null
+"$spel" prune "$dir" --keep 64 >/dev/null

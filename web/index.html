@@ -103,7 +103,7 @@ td{padding:8px 14px 8px 0;border-bottom:1px solid var(--seam)} td.n,th.n{text-al
 .bar{flex:none;min-height:var(--barh);border-top:1px solid var(--bright);background:var(--wall);display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding-block:9px;padding-bottom:calc(9px + env(safe-area-inset-bottom,0px));font-size:12.5px;font-variant-numeric:tabular-nums}
 .bar .dot{width:9px;height:9px;border:1px solid var(--bright);flex:none} .bar.on .dot{background:var(--bright);animation:pulse 1.4s steps(2) infinite}
 @keyframes pulse{50%{opacity:.25}} @media (prefers-reduced-motion: reduce){ .bar.on .dot{animation:none} }
-.bar .what{flex:1;min-width:0;color:var(--bright);overflow-wrap:anywhere}
+.bar .what{flex:1 1 14ch;min-width:0;color:var(--bright);overflow-wrap:anywhere}
 .bar .meter{flex:0 1 160px;min-width:60px}
 .bar .btn{padding:7px 14px;color:var(--bright)} .bar.on #go{background:var(--bright);color:var(--on-bright)}
 .arrows{position:absolute;right:max(16px,env(safe-area-inset-right,0px));bottom:12px;display:flex;gap:6px}
@@ -131,6 +131,13 @@ td{padding:8px 14px 8px 0;border-bottom:1px solid var(--seam)} td.n,th.n{text-al
 .log{flex:1;min-height:140px;overflow-y:auto;background:var(--wall);border:1px solid var(--seam);padding:10px 12px;font-size:12.5px;line-height:1.55}
 .log div{overflow-wrap:anywhere} .log time{color:var(--dim);margin-right:10px} .log .k{color:var(--bright);display:inline-block;min-width:6ch}
 @media (max-width:680px){
+  /* the nav in two rows, every item on screen: the name, github and the theme, then the panels */
+  nav{height:auto;min-height:var(--navh);flex-wrap:wrap;overflow-x:visible;gap:2px 14px;padding-block:8px;letter-spacing:.02em}
+  nav .name{order:0} nav a{order:1} nav .theme{order:2} nav::after{content:"";order:3;flex-basis:100%} nav button[data-go]{order:4}
+  /* the bar: what it is doing on its own line, the meter and the buttons under it */
+  .bar .what{flex:1 1 calc(100% - 30px)} .bar .meter{flex:1 1 60px}
+  /* a swipe turns the panels here; the arrows would sit on the text */
+  .arrows{display:none}
   .slab{grid-template-columns:minmax(0,1fr)} .slab .art{min-height:170px;border-left:1px solid var(--bright);border-top:0}
   .strip{grid-template-columns:repeat(2,minmax(0,1fr))} .strip div:nth-child(2){border-right:0} .strip div:nth-child(-n+2){border-bottom:1px solid var(--seam)}
   .console{grid-template-columns:minmax(0,1fr)} .console .feed{border-left:0;border-top:1px solid var(--seam)}

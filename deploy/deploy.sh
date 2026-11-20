@@ -47,7 +47,7 @@ chain)
 	need_key
 	[ -f "$CAVE/chain.cfg" ] || { echo "no chain at $CAVE"; exit 1; }
 	"$here/spel" verify "$CAVE"
-	on_box '[ ! -e /var/lib/spelaeum/cave ]' || { echo "the box already has a chain: not touching it"; exit 1; }
+	on_box 'sudo test ! -e /var/lib/spelaeum/cave' || { echo "the box already has a chain: not touching it"; exit 1; }
 	echo 0 > "$CAVE/mirrored"
 	# the chain whole; the mirror's copies of the big files only as names, since they are on Hugging Face already
 	tar -C "$(dirname "$CAVE")" -cf - "$(basename "$CAVE")" | on_box 'set -e
@@ -90,7 +90,7 @@ sudo install -m 644 deploy/spelaeum.caddy /etc/caddy/sites/spelaeum.caddy
 grep -q "^import /etc/caddy/sites/\*.caddy" /etc/caddy/Caddyfile || sudo sed -i "1i import /etc/caddy/sites/*.caddy" /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null
 sudo systemctl daemon-reload
-if [ -f /var/lib/spelaeum/cave/chain.cfg ]; then sudo systemctl enable spelaeum >/dev/null 2>&1; sudo systemctl restart spelaeum; else echo "no chain on the box yet: ./deploy.sh chain, then deploy again"; fi
+if sudo test -f /var/lib/spelaeum/cave/chain.cfg; then sudo systemctl enable spelaeum >/dev/null 2>&1; sudo systemctl restart spelaeum; else echo "no chain on the box yet: ./deploy.sh chain, then deploy again"; fi
 sudo systemctl reload caddy
 cd / && rm -rf /tmp/spelaeum'
 sleep 2
