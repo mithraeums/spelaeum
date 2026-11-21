@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later — Copyright (C) 2026 Zachary Blauser
 // trainer.js — spel train --url --loop for a page: the same steps as net_sync (src/net.c),
 // with fetch in place of curl and spel.wasm doing every check and every job. The
-// chain's copy lives in memory (wasi.js); the key is a 32-byte seed the page keeps.
+// chain's copy lives in memory (wasi.js), but for the big files that never change, which
+// in a worker live in the browser's own storage (OPFS) and are read in place; the key is
+// a 32-byte seed the page keeps.
 // Big files (the data, genesis, blocks, models) come from the mirror the coordinator
 // names, or `files` in its place ('' for none), and from the coordinator only when
 // the mirror lacks one; everything is checked by spel.wasm wherever it came from.
@@ -44,7 +46,9 @@ export class Trainer {
 
 	async spel(...args) {
 		const gpu = args[0] === 'train' && await this.device() ? this.gpu : null;   // only a job trains
-		const r = await run(this.module, this.fs, args, { HAKM_THREADS: '1', SPEL_EVERY: '1' }, gpu, (t) => this.on('stderr', t));
+		// on the CPU a job trains its batch a sequence a pass: the same gradient in under half the memory
+		const env = { HAKM_THREADS: '1', SPEL_EVERY: '1', ...(gpu ? {} : { SPEL_MICRO: '1' }) };
+		const r = await run(this.module, this.fs, args, env, gpu, (t) => this.on('stderr', t));
 		if (r.err) this.on('log', r.err);
 		if (r.code) throw new Error(`spel ${args[0]} failed (${r.code}): ${r.err.trim().split('\n').pop() || ''}`);
 		return r.out.trim();
@@ -71,7 +75,82 @@ export class Trainer {
 		if (keep) { try { await (await caches.open(this.cache)).put(`/${path}`, new Response(b)); } catch {} }
 		return b;
 	}
-	async forget() { if (this.cache) { try { await caches.delete(this.cache); } catch {} } }
+	async forget() {
+		if (this.cache) { try { await caches.delete(this.cache); } catch {} }
+		if (this.store) {
+			for (const k of [...this.fs.files.keys()]) if (this.fs.files.get(k).disk) this.fs.remove(k);
+			try { await (await navigator.storage.getDirectory()).removeEntry(this.store.name, { recursive: true }); } catch {}
+			this.store = null;
+		}
+	}
+	// the files kept on disk: the ones that never change
+	static kept(path) { return path === 'ids.bin' || path === 'genesis.mlf2' || path === 'genesis.opt' || path.startsWith('blocks/'); }
+	// a big file into the copy: on disk when this is a worker with OPFS, read in place and
+	// never held whole; in memory otherwise (a page, node, a browser without it)
+	async putBig(mpath, path) {
+		if (this.store && Trainer.kept(path)) {
+			let h = null;
+			try { h = await this.fromDisk(path); } catch {}
+			if (!h) {
+				const r = await this.fetchBig(mpath, path);
+				try { h = await this.toDisk(path, r); } catch (e) {
+					if (e.status) throw e;
+					this.on('log', `could not keep ${path} on disk (${e.name || e}): in memory instead\n`);
+					this.store = null;
+					this.fs.write(path, await this.getBig(mpath, path));
+					return;
+				}
+			}
+			this.fs.putDisk(path, h);
+			return;
+		}
+		this.fs.write(path, await this.getBig(mpath, path));
+	}
+	// a file kept by an earlier visit, whole when its .ok names its size; null otherwise
+	async fromDisk(path) {
+		const name = path.replace(/\//g, '_');
+		const ok = await this.store.getFileHandle(name + '.ok').then((f) => f.getFile()).then((f) => f.text());
+		const h = await (await this.store.getFileHandle(name)).createSyncAccessHandle();
+		if (h.getSize() === Number(ok)) { this.on('fetch', { name: path, from: 'cache' }); return h; }
+		h.close();
+		return null;
+	}
+	// a download streamed to disk a piece at a time, then its .ok
+	async toDisk(path, r) {
+		const name = path.replace(/\//g, '_');
+		try { await this.store.removeEntry(name + '.ok'); } catch {}
+		const h = await (await this.store.getFileHandle(name, { create: true })).createSyncAccessHandle();
+		let at = 0;
+		try {
+			h.truncate(0);
+			const rd = r.body.getReader();
+			for (;;) {
+				let part;
+				try { part = await rd.read(); } catch (e) { e.status = e.status || 599; throw e; }   /* the network's fault, not the disk's */
+				if (part.done) break;
+				h.write(part.value, { at });
+				at += part.value.length;
+			}
+			h.flush();
+			const ok = await (await this.store.getFileHandle(name + '.ok', { create: true })).createSyncAccessHandle();
+			const t = new TextEncoder().encode(String(at));
+			ok.truncate(0); ok.write(t, { at: 0 }); ok.flush(); ok.close();
+		} catch (e) { h.close(); throw e; }
+		return h;
+	}
+	// the response for a big file: the mirror's, else the coordinator's
+	async fetchBig(mpath, path) {
+		if (this.mirror) {
+			try {
+				const r = await fetch(`${this.mirror}/${mpath}`, { cache: 'no-store' });
+				if (r.ok) { this.fromFiles++; this.on('fetch', { name: path, from: 'mirror' }); return r; }
+			} catch {}
+		}
+		const r = await fetch(`${this.url}/${path}`, { cache: 'no-store' });
+		if (!r.ok) { const e = new Error(`${path}: ${r.status}`); e.status = r.status; throw e; }
+		this.fromUrl++; this.on('fetch', { name: path, from: 'coordinator' });
+		return r;
+	}
 	mirrorBlock(h) { return `blocks/${String(Math.floor(h / 1000)).padStart(3, '0')}/${String(h).padStart(6, '0')}.blk`; }
 	async mirrorTip() {
 		const [h, hash] = (await this.get('tip', 'text', this.mirror)).trim().split(' ');
@@ -107,11 +186,16 @@ export class Trainer {
 		let t = await this.tip();
 		const named = /^https?:\/\/[^\s"']+$/.test(t.files || '') ? t.files : '';
 		this.mirror = (this.files !== undefined ? this.files : named).replace(/\/+$/, '');
-		if (!this.fs.read('chain.cfg')) { this.on('fetch', { name: 'chain.cfg', from: 'coordinator' }); this.fs.write('chain.cfg', await this.get('chain.cfg')); }
+		if (!this.fs.has('chain.cfg')) { this.on('fetch', { name: 'chain.cfg', from: 'coordinator' }); this.fs.write('chain.cfg', await this.get('chain.cfg')); }
 		const g = /^genesis ([0-9a-f]{64})$/m.exec(new TextDecoder().decode(this.fs.read('chain.cfg')));
 		this.cache = g && typeof caches !== 'undefined' ? `spelaeum-${g[1]}` : null;
-		for (const f of ['genesis.mlf2', 'ids.bin']) if (!this.fs.read(f)) this.fs.write(f, await this.getBig(f, f));
-		if (!this.fs.read('genesis.opt')) { try { this.fs.write('genesis.opt', await this.getBig('genesis.opt', 'genesis.opt')); } catch (e) { if (e.status !== 404) throw e; } }
+		if (g && this.store === undefined && (this.store = await openStore(`spelaeum-${g[1]}`))) this.on('log', 'the big files are kept in this browser\'s storage and read in place\n');
+		if (this.store && this.cache) {   /* the disk holds them now: an earlier version's cached copies go */
+			try { for (const k of await caches.keys()) if (k.startsWith('spelaeum-')) await caches.delete(k); } catch {}
+			this.cache = null;
+		}
+		for (const f of ['genesis.mlf2', 'ids.bin']) if (!this.fs.has(f)) await this.putBig(f, f);
+		if (!this.fs.has('genesis.opt')) { try { await this.putBig('genesis.opt', 'genesis.opt'); } catch (e) { if (e.status !== 404) throw e; } }
 		try { await this.spel('start', '/c'); } catch (e) { await this.forget(); throw e; }
 		for (let tries = 0; ; tries++) {
 			if (tries) t = await this.tip();
@@ -124,7 +208,7 @@ export class Trainer {
 				try { t = await this.tip(); } catch {}
 			}
 			if (t.height - mine.height <= WHOLE) {
-				for (let h = mine.height + 1; h <= t.height; h++) this.fs.write(this.block(h), await this.getBig(this.mirrorBlock(h), this.block(h)));
+				for (let h = mine.height + 1; h <= t.height; h++) await this.putBig(this.mirrorBlock(h), this.block(h));
 				try { await this.spel('advance', '/c'); return this.check(t); } catch { this.on('log', 'taking the heads and the model instead\n'); }
 			}
 			// a mirror's snapshot between here and the tip: heads up to it, its model, the blocks after it whole
@@ -137,7 +221,7 @@ export class Trainer {
 						this.fs.write('tip.new', await this.get('tip.mlf2', 'bytes', this.mirror));
 						this.fromFiles++; this.on('fetch', { name: 'tip.mlf2', from: 'mirror' });
 						await this.spel('join', '/c', 'tip.new');
-						for (let h = s + 1; h <= t.height; h++) this.fs.write(this.block(h), await this.getBig(this.mirrorBlock(h), this.block(h)));
+						for (let h = s + 1; h <= t.height; h++) await this.putBig(this.mirrorBlock(h), this.block(h));
 						if (s < t.height) await this.spel('advance', '/c');
 						return this.check(t);
 					} catch { this.fs.remove('tip.new'); this.on('log', 'the mirror\'s snapshot did not do: taking the coordinator\'s\n'); }
@@ -221,6 +305,15 @@ export class Trainer {
 			}
 		}
 	}
+}
+
+// the chain's folder in the browser's own storage, when this is a worker that can read and
+// write it in place (sync access handles); null otherwise
+async function openStore(name) {
+	try {
+		if (typeof FileSystemSyncAccessHandle === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) return null;
+		return await (await navigator.storage.getDirectory()).getDirectoryHandle(name, { create: true });
+	} catch { return null; }
 }
 
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }

@@ -50,7 +50,7 @@ make test
 
 C11, libc and pthread. No Python, no framework, no GPU needed; `make GPU=1` trains on one (OpenCL, loaded at run time), loss checks staying on the CPU in integers.
 
-The same C trains in a browser tab: `make wasm` builds `web/spel.wasm` with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk), `web/wasi.js` gives it an in-memory file system, and `web/trainer.js` runs the rounds (the steps of `spel train --url --loop`, with fetch in place of curl). `make test-web` runs it under node against a real `spel serve`. Where the browser has WebGPU (and JSPI, for the C to wait on a read), a job trains on the GPU: `web/gpu.js` holds the engine's training kernels in WGSL and `web/gpu_web.c` puts them behind the engine's `gpu.h`; checks stay on the CPU. `make test-gpu-web` holds it to the CPU pass under deno.
+The same C trains in a browser tab: `make wasm` builds `web/spel.wasm` with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk), `web/wasi.js` gives it a file system, and `web/trainer.js` runs the rounds (the steps of `spel train --url --loop`, with fetch in place of curl). The big files that never change (the data, genesis, blocks) stream to the browser's own storage (OPFS) and are read in place, a window at a time, and a job on the CPU trains its batch a sequence a pass (`SPEL_MICRO`), so a tab needs well under a gigabyte. `make test-web` runs it under node against a real `spel serve`. Where the browser has WebGPU (and JSPI, for the C to wait on a read), a job trains on the GPU: `web/gpu.js` holds the engine's training kernels in WGSL and `web/gpu_web.c` puts them behind the engine's `gpu.h`; checks stay on the CPU. `make test-gpu-web` holds it to the CPU pass under deno.
 
 ## Use
 

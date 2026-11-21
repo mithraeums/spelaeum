@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -164,23 +163,52 @@ int ch_load_config(const char *dir, ch_config *c) {
 /* ── training tokens ────────────────────────────────────────────────────── */
 
 typedef struct { char magic[4]; uint32_t version; uint64_t n; } ids_head;
-typedef struct { const int *ids; int64_t n; void *map; size_t size; } ch_ids;
+/* the training tokens, read a window at a time and never held whole: in a browser
+ * there is no mmap, and a tab on a phone has no room for the file twice */
+typedef struct { int fd, open; int64_t n; ids_head h; } ch_ids;
+
+static int pread_all(int fd, void *buf, size_t len, off_t off) {
+	char *p = buf;
+	while (len) {
+		ssize_t r = pread(fd, p, len, off);
+		if (r < 0 && errno == EINTR) continue;
+		if (r <= 0) return -1;
+		p += r; len -= (size_t)r; off += r;
+	}
+	return 0;
+}
+/* n tokens from token `at` */
+static int ids_read(const ch_ids *d, int64_t at, int64_t n, int *out) {
+	if (!d->open || at < 0 || n < 0 || at > d->n - n) return -1;
+	return pread_all(d->fd, out, (size_t)n * sizeof(int), (off_t)(sizeof(ids_head) + (uint64_t)at * sizeof(int)));
+}
 
 /* The data's hash: sha256 of "spelaeum data\n", the head, then the sha256 of every
  * stripe of `stripe` tokens in order (the last may be short). Those bytes are what
  * a stripe index would hold, so a trainer can check one stripe it fetched alone
- * against the chain, without the whole file. */
-static void data_hash(const ids_head *h, const int *ids, int stripe, unsigned char out[32]) {
+ * against the chain, without the whole file. From the tokens in memory (ids), or
+ * read from d a run of stripes at a time. */
+static int data_hash(const ids_head *h, const int *ids, const ch_ids *d, int stripe, unsigned char out[32]) {
+	enum { RUN = 64 };
+	int *buf = ids ? NULL : malloc((size_t)stripe * RUN * sizeof(int));
+	if (!ids && !buf) return -1;
 	sha256_ctx c; sha256_init(&c);
 	sha256_add(&c, "spelaeum data\n", 14);
 	sha256_add(&c, h, sizeof *h);
-	for (uint64_t at = 0; at < h->n; at += (uint64_t)stripe) {
-		uint64_t k = h->n - at < (uint64_t)stripe ? h->n - at : (uint64_t)stripe;
-		unsigned char sh[32];
-		sha256(ids + at, (size_t)k * sizeof(int), sh);
-		sha256_add(&c, sh, 32);
+	for (uint64_t at = 0; at < h->n; at += (uint64_t)stripe * RUN) {
+		uint64_t run = h->n - at < (uint64_t)stripe * RUN ? h->n - at : (uint64_t)stripe * RUN;
+		const int *p = ids ? ids + at : buf;
+		if (!ids && ids_read(d, (int64_t)at, (int64_t)run, buf)) { free(buf); return -1; }
+		for (uint64_t o = 0; o < run; o += (uint64_t)stripe) {
+			uint64_t k = run - o < (uint64_t)stripe ? run - o : (uint64_t)stripe;
+			unsigned char sh[32];
+			sha256(p + o, (size_t)k * sizeof(int), sh);
+			sha256_add(&c, sh, 32);
+		}
 	}
 	sha256_done(&c, out);
+	free(buf);
+	return 0;
 }
 
 static int ids_open(const char *dir, ch_ids *d) {
@@ -189,21 +217,18 @@ static int ids_open(const char *dir, ch_ids *d) {
 	int fd = open(path, O_RDONLY);
 	struct stat st;
 	if (fd < 0 || fstat(fd, &st) != 0) { perror(path); if (fd >= 0) close(fd); return -1; }
-	d->size = (size_t)st.st_size;
-	d->map = d->size >= sizeof(ids_head) ? mmap(NULL, d->size, PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
-	close(fd);
-	if (d->map == MAP_FAILED) { fprintf(stderr, "chain: cannot map %s\n", path); return -1; }
-	const ids_head *h = d->map;
-	if (memcmp(h->magic, "HKID", 4) || h->version != CH_VERSION || h->n > (d->size - sizeof *h) / 4 ||
-	    sizeof *h + h->n * 4 != d->size) {
+	ids_head *h = &d->h;
+	uint64_t size = (uint64_t)st.st_size;
+	if (size < sizeof *h || pread_all(fd, h, sizeof *h, 0) || memcmp(h->magic, "HKID", 4) || h->version != CH_VERSION ||
+	    h->n > (size - sizeof *h) / 4 || sizeof *h + h->n * 4 != size) {
 		fprintf(stderr, "chain: %s is damaged\n", path);
-		munmap(d->map, d->size); return -1;
+		close(fd); return -1;
 	}
-	d->ids = (const int *)((const char *)d->map + sizeof *h);
+	d->fd = fd; d->open = 1;
 	d->n = (int64_t)h->n;
 	return 0;
 }
-static void ids_close(ch_ids *d) { if (d->map) munmap(d->map, d->size); d->map = NULL; }
+static void ids_close(ch_ids *d) { if (d->open) close(d->fd); d->open = 0; }
 
 /* ── the pieces both sides compute ──────────────────────────────────────── */
 
@@ -353,11 +378,14 @@ static int pick_windows(const unsigned char seed[32], const ch_ids *d, int shard
  * of memory or a window is bad. The callers change the weights through a pointer
  * they already hold; il_new reads them through tr_params, which drops the
  * trainer's transposed copies first. */
-static double eval_loss(tr_model *m, const int *ids, const int64_t *at, int n, int T) {
-	il_model *I = il_new(m);
-	int64_t nll = 0;
-	int bad = !I || il_nll(I, ids, at, n, T, &nll);
-	il_free(I);
+static double eval_loss(tr_model *m, const ch_ids *d, const int64_t *at, int n, int T) {
+	int *w = malloc((size_t)n * (T + 1) * sizeof(int) + 1);   /* the windows side by side */
+	int64_t *pos = malloc((size_t)n * sizeof *pos + 1), nll = 0;
+	il_model *I = NULL;
+	int bad = !w || !pos;
+	for (int i = 0; !bad && i < n; i++) { pos[i] = (int64_t)i * (T + 1); bad = ids_read(d, at[i], T + 1, w + pos[i]); }
+	if (!bad) { I = il_new(m); bad = !I || il_nll(I, w, pos, n, T, &nll); }
+	il_free(I); free(w); free(pos);
 	return bad ? -1 : il_nats(nll, (int64_t)n * T);
 }
 
@@ -510,7 +538,7 @@ int ch_init(const char *dir, const char *model, const char *opt, const char *dat
 	part ps[2] = { { &ih, sizeof ih }, { ids, (size_t)n * sizeof(int) } };
 	unsigned char dh[32], gh[32];
 	if (pj(path, dir, "ids.bin") || write_hashed(path, ps, 2, dh)) goto out;
-	data_hash(&ih, ids, p->stripe, dh);
+	if (data_hash(&ih, ids, NULL, p->stripe, dh)) goto out;
 	if (genesis_hash(dir, p, dh, gh)) goto out;
 	params_text(p, txt, sizeof txt);
 	sha256_hex(dh, hx); sha256_hex(gh, hx2);
@@ -605,8 +633,9 @@ int ch_train(const char *dir, const char *trainer, const ch_key *key, char commi
 	size_t np = m ? tr_n_params(m) : 0;
 	float *base = m ? malloc(np * sizeof(float)) : NULL;
 	int *in = malloc((size_t)B * T * sizeof(int) + 1), *tg = malloc((size_t)B * T * sizeof(int) + 1);
+	int *win = malloc((size_t)(T + 1) * sizeof(int) + 1);
 	uint32_t *un = nu > 0 ? malloc((size_t)nu * sizeof *un) : NULL;
-	if (!m || !base || !in || !tg || !un || (nu = job_units(m, &c.p, height + 1, parent, key->pk, un)) < 1) goto out;
+	if (!m || !base || !in || !tg || !win || !un || (nu = job_units(m, &c.p, height + 1, parent, key->pk, un)) < 1) goto out;
 	if (too_short(d.n, c.p.shards, c.p.stripe, T)) { fprintf(stderr, "chain: the data is too short for this model\n"); goto out; }
 
 	/* warm: the trainer's own optimizer, else the genesis one, else cold */
@@ -653,6 +682,11 @@ int ch_train(const char *dir, const char *trainer, const ch_key *key, char commi
 	}
 	const char *ev = getenv("SPEL_EVERY");   /* steps between progress lines: 50, or 1 for a page showing each */
 	int every = ev && atoi(ev) > 0 ? atoi(ev) : 50;
+	/* sequences a pass: the whole batch, or fewer where memory is short (a tab on a phone);
+	 * the passes add up to the same gradient, only summed in another order */
+	const char *mv = getenv("SPEL_MICRO");
+	int micro = mv && atoi(mv) > 0 && atoi(mv) < B ? atoi(mv) : B;
+	if (micro < B) fprintf(stderr, "  in passes of %d\n", micro);
 	for (int s = 0; s < c.p.steps; s++) {
 		float lr = c.p.lr, lo_lr = lr / 10;
 		float rate = s < warm ? lr * (s + 1) / warm
@@ -660,10 +694,16 @@ int ch_train(const char *dir, const char *trainer, const ch_key *key, char commi
 		tr_zero_grad(m);
 		for (int b = 0; b < B; b++) {
 			int64_t at = ch_window(d.n, c.p.shards, c.p.stripe, (int)shard, mix(rng++), T);
-			memcpy(in + (size_t)b * T, d.ids + at, (size_t)T * sizeof(int));
-			memcpy(tg + (size_t)b * T, d.ids + at + 1, (size_t)T * sizeof(int));
+			if (ids_read(&d, at, T + 1, win)) { fprintf(stderr, "train: could not read the data\n"); goto out; }
+			memcpy(in + (size_t)b * T, win, (size_t)T * sizeof(int));
+			memcpy(tg + (size_t)b * T, win + 1, (size_t)T * sizeof(int));
 		}
-		double l = tr_run(m, in, tg, B, T, 1.0f / ((float)B * T));
+		double l = 0;
+		for (int g = 0; g < B && l >= 0; g += micro) {
+			int k = B - g < micro ? B - g : micro;
+			double lg = tr_run(m, in + (size_t)g * T, tg + (size_t)g * T, k, T, 1.0f / ((float)B * T));
+			l = lg < 0 ? -1 : l + lg;
+		}
 		if (l < 0 || !isfinite(l)) { fprintf(stderr, "train: the loss went bad at step %d\n", s); goto out; }
 		loss = l / ((double)B * T);
 		if (moe) outside(m, un, nu, tr_grads(m), NULL);   /* before the clip: frozen grads count for nothing */
@@ -705,7 +745,7 @@ int ch_train(const char *dir, const char *trainer, const ch_key *key, char commi
 	if (pj(final, dir, name) || rename(path, final) != 0) { perror(final); remove(path); goto out; }
 	rc = 0;
 out:
-	free(base); free(in); free(tg); free(un);
+	free(base); free(in); free(tg); free(win); free(un);
 	tr_free(m); ids_close(&d);
 	return rc;
 }
@@ -953,7 +993,7 @@ static int seal(const char *dir, int need, int spot, int *taken) {
 
 	float *p = tr_params(m);
 	memcpy(base, p, np * sizeof(float));
-	double pl = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+	double pl = eval_loss(m, &d, at, c.p.eval_windows, T);
 	if (pl < 0) goto out;
 	fprintf(stderr, "seal: height %llu -> %llu, %d deltas, difficulty %.5f, parent loss %.4f on %d windows\n",
 	        (unsigned long long)height, (unsigned long long)height + 1, k, diff, pl, c.p.eval_windows);
@@ -972,7 +1012,7 @@ static int seal(const char *dir, int need, int spot, int *taken) {
 		if (na >= need && need > 0 && !spotted) { l = vl; from = 1; }
 		else {
 			apply(m, moe, un, nu, p, base, dl);
-			l = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+			l = eval_loss(m, &d, at, c.p.eval_windows, T);
 			apply(m, moe, un, nu, p, base, NULL);
 			if (l < 0) { free(dl); goto out; }
 			if (na >= need && need > 0 && vl != l) {   /* they agreed on a loss that is not the delta's */
@@ -1013,7 +1053,7 @@ static int seal(const char *dir, int need, int spot, int *taken) {
 				um[nm++] = (uint32_t)u; w += len;
 			}
 			apply(m, moe, um, nm, p, base, sum);
-			double ml = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+			double ml = eval_loss(m, &d, at, c.p.eval_windows, T);
 			apply(m, moe, um, nm, p, base, NULL);
 			if (ml < 0) goto out;
 			fprintf(stderr, "  merged %d: loss %.4f against the best alone %.4f\n", passed, ml, nl);
@@ -1176,7 +1216,7 @@ int ch_check(const char *dir, const char *round, const char *delta, unsigned cha
 	at = malloc((size_t)c.p.eval_windows * sizeof *at);
 	if (!at || pick_windows(seed, &d, c.p.shards, c.p.stripe, sh, n, T, c.p.eval_windows, at)) goto out;
 	apply(m, moe, un, nu, tr_params(m), NULL, dl);
-	double l = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+	double l = eval_loss(m, &d, at, c.p.eval_windows, T);
 	if (l < 0) goto out;
 	memset(v, 0, sizeof *v);
 	memcpy(v->commit, commit, 32);
@@ -1268,7 +1308,7 @@ static int model_at(const char *dir, const ch_config *c, uint64_t h, unsigned ch
 /* data and genesis: the text a trainer trains on is the chain's, and so is block 0 */
 static int check_genesis(const char *dir, const ch_config *c, const ch_ids *d) {
 	unsigned char dh[32], gh[32];
-	data_hash(d->map, d->ids, c->p.stripe, dh);
+	if (data_hash(&d->h, NULL, d, c->p.stripe, dh)) return -1;
 	if (memcmp(dh, c->data, 32)) { fprintf(stderr, "verify: ids.bin is not the data this chain was made on\n"); return -1; }
 	if (genesis_hash(dir, &c->p, dh, gh) || memcmp(gh, c->genesis, 32)) { fprintf(stderr, "verify: genesis.mlf2 or chain.cfg changed\n"); return -1; }
 	return 0;
@@ -1322,13 +1362,13 @@ static int walk(const char *dir, int mode, int full, const char *model) {
 		if (!bad && full) {
 			if (pick_windows(hd->seed, &d, c.p.shards, c.p.stripe, skip, (int)hd->ncontrib, T, c.p.eval_windows, at)) bad = "no windows";
 			else {
-				double pl = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+				double pl = eval_loss(m, &d, at, c.p.eval_windows, T);
 				if (pl != hd->parent_loss) bad = "parent loss does not reproduce";
 			}
 		}
 		if (!bad && mode != JOIN) apply(m, moe, bu, (int)nb, p, NULL, dl);
 		if (!bad && full && hd->n) {
-			double nl = eval_loss(m, d.ids, at, c.p.eval_windows, T);
+			double nl = eval_loss(m, &d, at, c.p.eval_windows, T);
 			if (nl != hd->new_loss) bad = "the block's loss does not reproduce";
 		}
 		if (!bad && full && (model_hash(m, mh), memcmp(mh, hd->model, 32))) bad = "its model is not the one its head names";

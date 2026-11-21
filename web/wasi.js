@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later — Copyright (C) 2026 Zachary Blauser
 // wasi.js — just enough WASI preview 1 for spel.wasm: one directory, preopened as
-// /c, held in memory as a Map of path -> file (or a directory marker). The chain's
-// C does its own file work (fopen, rename, opendir, truncate) and this answers it.
+// /c, held as a Map of path -> file (or a directory marker). The chain's C does its
+// own file work (fopen, rename, opendir, truncate) and this answers it. A file is
+// { data, size } in memory, or { disk, size }: a sync access handle on a file in the
+// browser's own storage (OPFS, workers only), read and written in place, so the
+// data (421 MB) never sits in memory, which a phone's tab has no room for.
 // No network, no clock beyond Date, no other files. Runs in a page, a worker or node.
 
 const OK = 0, BADF = 8, EXIST = 20, INVAL = 28, ISDIR = 31, NOENT = 44, NOSYS = 52, NOTDIR = 54, NOTEMPTY = 55;
@@ -19,14 +22,26 @@ export class Fs {
 		return out.join('/');
 	}
 	parent(p) { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i); }
-	read(p) { const f = this.files.get(this.norm(p)); return f ? f.data.subarray(0, f.size) : null; }
-	write(p, bytes) {
+	has(p) { return this.files.has(this.norm(p)); }
+	read(p) {
+		const f = this.files.get(this.norm(p));
+		if (!f) return null;
+		if (!f.disk) return f.data.subarray(0, f.size);
+		const b = new Uint8Array(f.size);
+		f.disk.read(b, { at: 0 });
+		return b;
+	}
+	set(p, f) {
 		p = this.norm(p);
 		for (let d = this.parent(p); d && !this.dirs.has(d); d = this.parent(d)) this.dirs.add(d);
-		const data = new Uint8Array(bytes);
-		this.files.set(p, { data, size: data.length });
+		this.drop(p);
+		this.files.set(p, f);
 	}
-	remove(p) { this.files.delete(this.norm(p)); }
+	write(p, bytes) { const data = new Uint8Array(bytes); this.set(p, { data, size: data.length }); }
+	putDisk(p, disk) { this.set(p, { disk, size: disk.getSize() }); }
+	drop(p) { const f = this.files.get(p); if (f && f.disk) { try { f.disk.close(); } catch {} } }
+	remove(p) { p = this.norm(p); this.drop(p); this.files.delete(p); }
+	close() { for (const k of this.files.keys()) this.drop(k); this.files.clear(); }
 	list(dir) {
 		dir = this.norm(dir);
 		const pre = dir ? dir + '/' : '', names = new Map();
@@ -114,8 +129,11 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 					const f = fs.files.get(d.path);
 					if (d.append) d.pos = f.size;
 					const end = d.pos + l;
-					if (end > f.data.length) { const g = new Uint8Array(Math.max(end, f.data.length * 2, 4096)); g.set(f.data.subarray(0, f.size)); f.data = g; }
-					f.data.set(b, d.pos);
+					if (f.disk) f.disk.write(b, { at: d.pos });
+					else {
+						if (end > f.data.length) { const g = new Uint8Array(Math.max(end, f.data.length * 2, 4096)); g.set(f.data.subarray(0, f.size)); f.data = g; }
+						f.data.set(b, d.pos);
+					}
 					d.pos = end;
 					if (end > f.size) f.size = end;
 				}
@@ -150,7 +168,8 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 			const d = fds.get(fd);
 			if (!d || d.dir) return BADF;
 			const f = fs.files.get(d.path), n = Number(size);
-			if (n > f.data.length) { const g = new Uint8Array(n); g.set(f.data.subarray(0, f.size)); f.data = g; }
+			if (f.disk) f.disk.truncate(n);
+			else if (n > f.data.length) { const g = new Uint8Array(n); g.set(f.data.subarray(0, f.size)); f.data = g; }
 			else f.data.fill(0, n, f.size);
 			f.size = n;
 			return OK;
@@ -181,7 +200,7 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 					f = { data: new Uint8Array(0), size: 0 };
 					fs.files.set(path, f);
 				}
-				if (trunc) f.size = 0;
+				if (trunc) { if (f.disk) f.disk.truncate(0); f.size = 0; }
 				fds.set(nextFd, { path, dir: false, pos: 0, append: !!(fdflags & 1) });
 			}
 			view().setUint32(outFd, nextFd++, true);
@@ -206,7 +225,8 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 			const path = resolve(fd, p, n);
 			if (path === null) return BADF;
 			if (fs.dirs.has(path)) return ISDIR;
-			if (!fs.files.delete(path)) return NOENT;
+			if (!fs.files.has(path)) return NOENT;
+			fs.remove(path);
 			return OK;
 		},
 		path_rename(fd, p, n, fd2, q, m) {
@@ -217,6 +237,7 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 			if (fs.dirs.has(b)) return ISDIR;
 			if (!fs.dirs.has(fs.parent(b))) return NOENT;
 			fs.files.delete(a);
+			fs.drop(b);
 			fs.files.set(b, f);
 			for (const d of fds.values()) if (d.path === a) d.path = b;
 			return OK;
@@ -254,7 +275,8 @@ export async function run(module, fs, args, env = { HAKM_THREADS: '1' }, gpu = n
 		for (let i = 0; i < n; i++) {
 			const p = v.getUint32(iovs + 8 * i, true), l = v.getUint32(iovs + 8 * i + 4, true);
 			const k = Math.max(0, Math.min(l, f.size - pos));
-			u8().set(f.data.subarray(pos, pos + k), p);
+			if (f.disk) { if (k) f.disk.read(u8().subarray(p, p + k), { at: pos }); }   /* straight into the C's memory */
+			else u8().set(f.data.subarray(pos, pos + k), p);
 			pos += k; total += k;
 			if (k < l) break;
 		}

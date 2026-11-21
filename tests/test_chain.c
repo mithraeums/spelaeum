@@ -356,6 +356,43 @@ int main(void) {
 		ck(ch_verify(DIRP, 1) == 0, "three blocks replay");
 	}
 
+	/* a job trained a sequence a pass (SPEL_MICRO, a phone's tab): the same job on a copy,
+	   the passes adding up to the batch's gradient, so the same delta but for rounding */
+	{
+		char cp[300], cmd[700], c1[65], c2[65], f1[600], f2[600];
+		snprintf(cp, sizeof cp, "%s-micro", DIRP);
+		snprintf(cmd, sizeof cmd, "rm -rf '%s' && cp -R '%s' '%s'", cp, DIRP, cp);
+		ck(system(cmd) == 0, "micro: a copy of the chain");
+		int ok1 = ch_train(DIRP, "dave", KEY("dave"), c1) == 0;
+		setenv("SPEL_MICRO", "1", 1);
+		int ok2 = ch_train(cp, "dave", KEY("dave"), c2) == 0;
+		unsetenv("SPEL_MICRO");
+		ck(ok1 && ok2, "micro: the job trained whole and a sequence a pass");
+		snprintf(f1, sizeof f1, "%s/pending/%s.dlt", DIRP, c1); snprintf(f2, sizeof f2, "%s/pending/%s.dlt", cp, c2);
+		FILE *a1 = ok1 ? fopen(f1, "rb") : NULL, *a2 = ok2 ? fopen(f2, "rb") : NULL;
+		ch_dhead h1, h2;
+		int heads = a1 && a2 && fread(&h1, sizeof h1, 1, a1) == 1 && fread(&h2, sizeof h2, 1, a2) == 1 && h1.n == h2.n && h1.n > 0;
+		double dd = 0, nn = 0;
+		int same = 1;
+		for (uint64_t i = 0; heads && i < h1.n; i++) {
+			float x, y;
+			if (fread(&x, 4, 1, a1) != 1 || fread(&y, 4, 1, a2) != 1) { heads = 0; break; }
+			dd += (double)(x - y) * (x - y); nn += (double)x * x; same &= x == y;
+		}
+		if (a1) fclose(a1);
+		if (a2) fclose(a2);
+		char msg[200];
+		snprintf(msg, sizeof msg, "micro: the same job's delta, %.2g apart (relative), last-step loss %.5f and %.5f",
+		         nn > 0 ? sqrt(dd / nn) : -1.0, heads ? h1.train_loss : -1.0, heads ? h2.train_loss : -1.0);
+		ck(heads && nn > 0 && sqrt(dd / nn) < 1e-3 && fabs(h1.train_loss - h2.train_loss) < 1e-4, msg);
+		ck(heads && !same, "micro: and not the whole batch's to the bit: the passes did run");
+		char op[512];
+		at(op, "trainers/dave.opt");
+		ck(remove(f1) == 0 && remove(op) == 0, "micro: dave's delta and optimizer cleared away");
+		snprintf(cmd, sizeof cmd, "rm -rf '%s'", cp);
+		if (system(cmd) != 0) fails++;
+	}
+
 	/* tampering anywhere breaks the replay */
 	flip("blocks/000001.blk", -5);
 	ck(ch_verify(DIRP, 0) != 0, "a changed weight in block 1 breaks the chain");
